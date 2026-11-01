@@ -5,13 +5,14 @@ public import EthLib.Cryptography.Hash.Blake2b
 /-!
 # Proofs: `Hash.Blake2b`
 
-The constants and the function F of BLAKE2b, checked against RFC 7693 and the test vectors of BLAKE2.
+The constants, the rounds and two known answers of F, against [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693).
 
-- `IV` is what §2.6 derives from the square roots of the first eight primes.
-- Each row of `SIGMA` is a permutation of the 16 word indices.
-- F agrees with the example of Appendix A, and with the BLAKE2b answer for one full block.
+- The IV is what §2.6 derives from the square roots of the first eight primes.
+- Each row of the message schedule is a permutation of the 16 word indices.
+- Round `i` uses row `i mod 10`, and a run of rounds splits into two runs.
+- F gives the state of Appendix A, and the BLAKE2b-512 digest of one full block.
 
-`decide +kernel` has the kernel itself evaluate each claim, so no compiled code is trusted.
+`decide +kernel` has the kernel evaluate each known answer, so no compiled code is trusted.
 -/
 
 @[expose] public section
@@ -20,15 +21,12 @@ namespace EthLib.Cryptography.Hash.Blake2b
 
 /-! ## The constants -/
 
-/-- `IV[i]` is `floor(2^64 * frac(sqrt(p)))` for the `(i + 1)`-th prime `p`, RFC 7693 §2.6.
+/-- Word `i` of the IV is `floor(2^64 * frac(sqrt(p)))`, for `p` the `(i + 1)`-th prime, RFC 7693 §2.6.
 
-§2.6 lists the primes: 2, 3, 5, 7, 11, 13, 17 and 19.
-
-Let `n = floor(sqrt(p))` and `s = 2^64 * n + IV[i]`.
-
-Then `IV[i]` is right exactly when `s = floor(2^64 * sqrt(p))`, that is when `s^2 <= 2^128 * p < (s + 1)^2`.
-
-`IV[i]` is below `2^64`, so the bounds hold for no `n` other than `floor(sqrt(p))`. -/
+- The primes are 2, 3, 5, 7, 11, 13, 17 and 19.
+- Let `n = floor(sqrt(p))` and `s = 2^64 * n + IV[i]`.
+- The word is right exactly when `s = floor(2^64 * sqrt(p))`.
+- That is `s^2 <= 2^128 * p < (s + 1)^2`. -/
 theorem IV_sqrt (i : Fin 8) :
     let p := #v[2, 3, 5, 7, 11, 13, 17, 19][i]
     let s := 2 ^ 64 * #v[1, 1, 2, 2, 3, 3, 4, 4][i] + IV[i].toNat
@@ -36,25 +34,42 @@ theorem IV_sqrt (i : Fin 8) :
   revert i
   decide +kernel
 
-/-- Each row of `SIGMA` is a permutation of the word indices 0 to 15, as RFC 7693 §2.7 calls them.
+/-- Each row of the message schedule is a permutation of the indices 0 to 15, RFC 7693 §2.7.
 
-So each round of F reads every message word exactly once. -/
+So each round reads every message word exactly once. -/
 theorem SIGMA_perm (i : Fin 10) : SIGMA[i].toList.Perm (List.finRange 16) := by
   revert i
   decide +kernel
 
+/-! ## The rounds -/
+
+/-- Round `i + 10` is round `i`, RFC 7693 §2.7.
+
+The schedule has 10 rows, so rounds 10 and 11 of BLAKE2b reuse rows 0 and 1. -/
+theorem round_add_ten (m v : Vector UInt64 16) (i : Nat) : round m (i + 10) v = round m i v := by
+  simp only [round, Nat.add_mod_right]
+
+/-- Running `a + b` rounds is running `a` rounds, then the `b` rounds after them. -/
+theorem roundsFrom_add (m v : Vector UInt64 16) (start a b : Nat) :
+    roundsFrom m start (a + b) v = roundsFrom m (start + a) b (roundsFrom m start a v) := by
+  induction a generalizing start v with
+  | zero => simp [roundsFrom]
+  | succ a ih =>
+    -- Peel the first round off both sides, then apply the induction hypothesis.
+    rw [Nat.add_right_comm, roundsFrom, ih, roundsFrom]
+    congr 1
+    omega
+
 /-! ## RFC 7693 Appendix A
 
-The appendix computes BLAKE2b-512 of the three bytes "abc".
+The appendix computes BLAKE2b-512 of "abc", one call of F with 12 rounds (§3.3).
 
-The message fits in one block, so the hash is one call of F with 12 rounds (§3.3):
-
-- `h` is the IV, with the parameter block `0x01010040` XORed into `h[0]`, for a 64-byte digest and no key (§2.5).
-- `m` is the block, "abc" followed by zeros, as 16 little-endian words.
+- `h` is the IV, with the parameter block `0x01010040` in its first word: a 64-byte digest, no key (§2.5).
+- `m` is "abc" followed by zeros, as 16 little-endian words.
 - `t` is 3, the number of message bytes.
-- `f` is true, because it is the last block.
+- `f` is true, for the last block.
 
-The appendix prints `m` and the new `h` as words, which are copied below as it prints them. -/
+The words below are copied as the appendix prints them. -/
 
 /-- F on the block of Appendix A gives the state that Appendix A prints. -/
 theorem compress_abc :
@@ -73,20 +88,18 @@ theorem compress_abc :
 
 /-! ## One full block
 
-Appendix A leaves 15 of the 16 words of `m` at zero, so it cannot tell those words apart.
+Appendix A leaves 15 of the 16 message words at zero.
 
-Nor, then, can it tell the right order of a row of `SIGMA` from a wrong order that only swaps two of those words.
+So it cannot catch a schedule row that swaps two of them.
 
-The official BLAKE2 implementations, github.com/BLAKE2/BLAKE2 at `ed1974e`, give known answers in `testvectors/blake2-kat.json`.
+This answer has 16 different words: the unkeyed BLAKE2b-512 digest of the 128 bytes `0x00` to `0x7f`.
 
-Its unkeyed BLAKE2b answer for the 128 bytes `0x00` to `0x7f` is again one call of F with 12 rounds:
-
+- Source: `testvectors/blake2-kat.json` of [BLAKE2/BLAKE2 at `ed1974e`](https://github.com/BLAKE2/BLAKE2/blob/ed1974ea83433eba7b2d95c5dcd9ac33cb847913/testvectors/blake2-kat.json).
 - `h` is the IV with the parameter block of Appendix A.
-- `m` is the block, as 16 little-endian words, all of them different.
 - `t` is 128, the number of message bytes.
-- `f` is true, because it is the last block.
+- `f` is true, for the last block.
 
-The file prints the message and the digest as bytes, which are read below as little-endian words (§2.4). -/
+The message and the digest are read as little-endian words (§2.4). -/
 
 /-- F on one full block gives the digest of the BLAKE2 test vectors. -/
 theorem compress_fullBlock :

@@ -136,6 +136,15 @@ def round (m : Vector UInt64 16) (i : Nat) (v : Vector UInt64 16) : Vector UInt6
   let v := mix v 2 7  8 13 m[s[12]] m[s[13]]
   mix v 3 4  9 14 m[s[14]] m[s[15]]
 
+/-- The rounds `start` to `start + count - 1` of F, in order.
+
+It recurses on the count, so the kernel can unfold it.
+
+It is a tail call, so it compiles to a loop, even for `2^32 - 1` rounds. -/
+def roundsFrom (m : Vector UInt64 16) (start : Nat) : Nat → Vector UInt64 16 → Vector UInt64 16
+  | 0, v => v
+  | count + 1, v => roundsFrom m (start + 1) count (round m start v)
+
 /-- The compression function F, RFC 7693 §3.2, with `rounds` rounds.
 
 - `h` is the state vector.
@@ -164,7 +173,7 @@ def compress (rounds : Nat) (h : Vector UInt64 8) (m : Vector UInt64 16) (t0 t1 
   -- The last block inverts all bits of `v[14]`.
   let v := if f then v.set 14 (v[14] ^^^ 0xFFFFFFFFFFFFFFFF) else v
   -- The rounds `0` to `rounds - 1`, in order.
-  let v := Nat.fold rounds (fun i _ v => round m i v) v
+  let v := roundsFrom m 0 rounds v
   -- XOR the two halves of the work vector into the state.
   Vector.ofFn fun i => h[i] ^^^ v[i] ^^^ v[i.val + 8]
 
